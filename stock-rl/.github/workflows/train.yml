@@ -1,0 +1,65 @@
+name: DQN Stock RL — CI Pipeline
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⬇️ Checkout repository
+        uses: actions/checkout@v3
+
+      - name: 🐍 Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🔍 Lint with flake8
+        run: |
+          pip install flake8
+          flake8 sim/ agent/ train.py evaluate.py --max-line-length=100 --ignore=E501
+
+      - name: 🧪 Smoke test — Environment
+        run: |
+          python -c "
+          import numpy as np
+          from sim.stock_env import StockTradingEnv
+          prices = np.cumsum(np.random.randn(300)) + 100
+          env = StockTradingEnv(prices, initial_cash=10000, window=20)
+          obs, _ = env.reset()
+          obs2, rew, done, _, info = env.step(1)
+          assert obs.shape == (7,), 'Obs shape mismatch'
+          assert 'portfolio_value' in info
+          print('✅ Environment smoke test passed')
+          "
+
+      - name: 🧪 Smoke test — DQN Agent
+        run: |
+          python -c "
+          import numpy as np
+          from agent.dqn_agent import DQNAgent
+          cfg = {
+            'gamma': 0.99, 'lr': 0.001, 'batch_size': 8,
+            'buffer_size': 100, 'epsilon_start': 1.0,
+            'epsilon_min': 0.05, 'epsilon_decay': 0.995,
+            'target_update_freq': 10
+          }
+          agent = DQNAgent(state_dim=7, action_dim=3, cfg=cfg)
+          state = np.random.randn(7).astype('float32')
+          action = agent.select_action(state)
+          assert action in [0, 1, 2], 'Invalid action'
+          print('✅ DQN Agent smoke test passed')
+          "
+
+      - name: ✅ All checks passed
+        run: echo "CI Pipeline completed successfully!"

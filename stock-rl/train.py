@@ -1,151 +1,168 @@
 """
-train.py — Train DQN agent on Stock Trading Environment
+train.py — Train DQN agent with MLflow experiment tracking
 Usage: python train.py --config configs/dqn_v1.yaml
 """
 
 import argparse
-import csv
 import os
-import uuid
 import yaml
 import numpy as np
+import mlflow
+import mlflow.pytorch
 import yfinance as yf
-from datetime import datetime
 from sim.stock_env import StockTradingEnv
 from agent.dqn_agent import DQNAgent
 
 
-# ------------------------------------------------------------------
-# Load config
 # ------------------------------------------------------------------
 def load_cfg(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
 
 
-# ------------------------------------------------------------------
-# Download / load price data
-# ------------------------------------------------------------------
-def get_prices(ticker: str, start: str, end: str) -> np.ndarray:
-    print(f"  Fetching {ticker} from {start} to {end} ...")
+def get_prices(ticker, start, end):
+    print(f"  Fetching {ticker} [{start} → {end}] ...")
     df = yf.download(ticker, start=start, end=end, progress=False)
-    prices = df["Close"].values.flatten().astype(np.float32)
+    prices = df["Close"].values.flatten().astype(float)
     print(f"  {len(prices)} trading days loaded.")
     return prices
 
 
-# ------------------------------------------------------------------
-# Sharpe ratio helper
-# ------------------------------------------------------------------
-def sharpe(returns: list, rf: float = 0.0) -> float:
+def sharpe(returns, rf=0.0):
     r = np.array(returns)
     if r.std() < 1e-9:
         return 0.0
     return float((r.mean() - rf) / r.std() * np.sqrt(252))
 
 
-# ------------------------------------------------------------------
-# Training loop
-# ------------------------------------------------------------------
-def train(cfg: dict):
-    run_id   = str(uuid.uuid4())[:8]
-    exp_dir  = "experiments"
-    mdl_dir  = "models"
-    os.makedirs(exp_dir, exist_ok=True)
-    os.makedirs(mdl_dir, exist_ok=True)
+def max_drawdown(portfolio_vals):
+    vals = np.array(portfolio_vals)
+    peak = np.maximum.accumulate(vals)
+    return float(((vals - peak) / (peak + 1e-9)).min())
 
-    # ---- Data ----
+
+# ------------------------------------------------------------------
+def train(cfg: dict, config_path: str):
+    os.makedirs("models", exist_ok=True)
+
     prices = get_prices(cfg["ticker"], cfg["train_start"], cfg["train_end"])
+    env    = StockTradingEnv(prices,
+                              initial_cash=cfg["initial_cash"],
+                              window=cfg["window"])
+    agent  = DQNAgent(state_dim=env.observation_space.shape[0],
+                      action_dim=env.action_space.n,
+                      cfg=cfg)
 
-    # ---- Env + Agent ----
-    env   = StockTradingEnv(prices, initial_cash=cfg["initial_cash"],
-                             window=cfg["window"])
-    agent = DQNAgent(state_dim=env.observation_space.shape[0],
-                     action_dim=env.action_space.n,
-                     cfg=cfg)
+    # ── MLflow setup ──────────────────────────────────────────────
+    mlflow.set_experiment("DQN-Stock-Trading")
 
-    # ---- CSV logger ----
-    csv_path = os.path.join(exp_dir, f"results_{run_id}.csv")
-    csv_file = open(csv_path, "w", newline="")
-    writer   = csv.DictWriter(csv_file, fieldnames=[
-        "run_id", "episode", "total_reward", "avg_reward",
-        "final_portfolio", "sharpe_ratio", "avg_wait_proxy",
-        "epsilon", "lr", "loss"
-    ])
-    writer.writeheader()
+    with mlflow.start_run(run_name=f"dqn-{cfg['ticker']}-v{cfg.get('version','1')}") as run:
+        print(f"\n  MLflow Run ID : {run.info.run_id}")
 
-    print(f"\n{'='*55}")
-    print(f"  Run ID : {run_id}")
-    print(f"  Ticker : {cfg['ticker']}  |  Episodes: {cfg['episodes']}")
-    print(f"{'='*55}\n")
-
-    best_sharpe  = -np.inf
-    ep_rewards   = []
-
-    for ep in range(1, cfg["episodes"] + 1):
-        obs, _     = env.reset()
-        done       = False
-        tot_reward = 0.0
-        step_returns = []
-        losses     = []
-        init_val   = env.portfolio_value
-
-        while not done:
-            action          = agent.select_action(obs)
-            next_obs, rew, done, _, info = env.step(action)
-            agent.store(obs, action, rew, next_obs, float(done))
-            loss = agent.learn()
-            if loss is not None:
-                losses.append(loss)
-            obs         = next_obs
-            tot_reward += rew
-            step_returns.append(info["step_return"])
-
-        final_val  = env.portfolio_value
-        ep_sharpe  = sharpe(step_returns)
-        avg_reward = tot_reward / env.current_step
-        avg_loss   = float(np.mean(losses)) if losses else 0.0
-        ep_rewards.append(tot_reward)
-
-        row = {
-            "run_id":           run_id,
-            "episode":          ep,
-            "total_reward":     round(tot_reward, 4),
-            "avg_reward":       round(avg_reward, 6),
-            "final_portfolio":  round(final_val, 2),
-            "sharpe_ratio":     round(ep_sharpe, 4),
-            "avg_wait_proxy":   round(1.0 / (ep_sharpe + 1e-9), 4),  # inverse sharpe proxy
-            "epsilon":          round(agent.epsilon, 4),
+        # Log all config params
+        mlflow.log_params({
+            "ticker":           cfg["ticker"],
+            "train_start":      cfg["train_start"],
+            "train_end":        cfg["train_end"],
+            "initial_cash":     cfg["initial_cash"],
+            "gamma":            cfg["gamma"],
             "lr":               cfg["lr"],
-            "loss":             round(avg_loss, 6),
-        }
-        writer.writerow(row)
-        csv_file.flush()
+            "batch_size":       cfg["batch_size"],
+            "buffer_size":      cfg["buffer_size"],
+            "epsilon_start":    cfg["epsilon_start"],
+            "epsilon_min":      cfg["epsilon_min"],
+            "epsilon_decay":    cfg["epsilon_decay"],
+            "episodes":         cfg["episodes"],
+            "target_update_freq": cfg["target_update_freq"],
+        })
 
-        if ep % 10 == 0:
-            print(f"  Ep {ep:4d} | Reward: {tot_reward:8.4f} | "
-                  f"Portfolio: ${final_val:9.2f} | "
-                  f"Sharpe: {ep_sharpe:6.3f} | ε: {agent.epsilon:.3f}")
+        # Log the config file itself as artifact
+        mlflow.log_artifact(config_path, artifact_path="configs")
 
-        # Save best policy
-        if ep_sharpe > best_sharpe:
-            best_sharpe = ep_sharpe
-            agent.save(os.path.join(mdl_dir, "policy_v1.pt"))
+        best_sharpe   = -np.inf
+        best_portfolio = 0.0
 
-    # Save final (most-explored) policy
-    agent.save(os.path.join(mdl_dir, "policy_v2_explored.pt"))
+        print(f"\n{'='*58}")
+        print(f"  Ticker: {cfg['ticker']}  |  Episodes: {cfg['episodes']}")
+        print(f"{'='*58}\n")
 
-    csv_file.close()
-    print(f"\n  Training complete!")
-    print(f"  Best Sharpe  : {best_sharpe:.4f}")
-    print(f"  Results CSV  : {csv_path}")
-    print(f"  Models saved : models/policy_v1.pt  |  policy_v2_explored.pt")
+        for ep in range(1, cfg["episodes"] + 1):
+            obs, _       = env.reset()
+            done         = False
+            tot_reward   = 0.0
+            step_returns = []
+            port_vals    = []
+            losses       = []
+
+            while not done:
+                action = agent.select_action(obs)
+                obs, rew, done, _, info = env.step(action)
+                agent.store(obs, action, rew, obs, float(done))
+                loss = agent.learn()
+                if loss is not None:
+                    losses.append(loss)
+                tot_reward += rew
+                step_returns.append(info["step_return"])
+                port_vals.append(info["portfolio_value"])
+
+            final_val  = env.portfolio_value
+            ep_sharpe  = sharpe(step_returns)
+            ep_mdd     = max_drawdown(port_vals)
+            avg_loss   = float(np.mean(losses)) if losses else 0.0
+            total_ret  = (final_val - cfg["initial_cash"]) / cfg["initial_cash"] * 100
+
+            # ── Log metrics to MLflow every episode ───────────────
+            mlflow.log_metrics({
+                "total_reward":     tot_reward,
+                "avg_reward":       tot_reward / max(env.current_step, 1),
+                "final_portfolio":  final_val,
+                "total_return_pct": total_ret,
+                "sharpe_ratio":     ep_sharpe,
+                "max_drawdown":     ep_mdd,
+                "epsilon":          agent.epsilon,
+                "loss":             avg_loss,
+            }, step=ep)
+
+            # Save best model
+            if ep_sharpe > best_sharpe:
+                best_sharpe    = ep_sharpe
+                best_portfolio = final_val
+                agent.save("models/policy_v1.pt")
+                # Log model to MLflow
+                mlflow.pytorch.log_model(agent.policy_net,
+                                          artifact_path="models/policy_v1")
+
+            if ep % 10 == 0:
+                print(f"  Ep {ep:4d} | Reward: {tot_reward:8.3f} | "
+                      f"Portfolio: ${final_val:9.2f} | "
+                      f"Sharpe: {ep_sharpe:6.3f} | ε: {agent.epsilon:.3f}")
+
+        # Save final explored policy
+        agent.save("models/policy_v2_explored.pt")
+        mlflow.pytorch.log_model(agent.policy_net,
+                                  artifact_path="models/policy_v2_explored")
+
+        # Log final summary metrics
+        mlflow.log_metrics({
+            "best_sharpe_ratio":    best_sharpe,
+            "best_portfolio_value": best_portfolio,
+        }, step=cfg["episodes"])
+
+        # Log both model files as artifacts
+        mlflow.log_artifact("models/policy_v1.pt",          "saved_models")
+        mlflow.log_artifact("models/policy_v2_explored.pt", "saved_models")
+
+        print(f"\n  ✅ Training complete!")
+        print(f"  Best Sharpe     : {best_sharpe:.4f}")
+        print(f"  Best Portfolio  : ${best_portfolio:.2f}")
+        print(f"  MLflow Run ID   : {run.info.run_id}")
+        print(f"\n  👉 View results : mlflow ui")
 
 
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/dqn_v1.yaml")
-    args   = parser.parse_args()
-    cfg    = load_cfg(args.config)
-    train(cfg)
+    args = parser.parse_args()
+    cfg  = load_cfg(args.config)
+    train(cfg, args.config)
