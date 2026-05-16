@@ -1,0 +1,31 @@
+# ============================================================
+# DQN Stock Trading — Experiment Config v1
+# Run: python train.py --config configs/dqn_v1.yaml
+# ============================================================
+
+# --- Data ---
+ticker:       "AAPL"          # Stock ticker (yfinance)
+train_start:  "2015-01-01"
+train_end:    "2022-12-31"
+eval_start:   "2023-01-01"
+eval_end:     "2024-12-31"
+
+# --- Environment ---
+initial_cash: 10000.0
+window:       20               # lookback window for MA / volatility
+
+# --- DQN Agent ---
+gamma:              0.99       # discount factor
+lr:                 0.001      # learning rate
+batch_size:         64
+buffer_size:        10000      # replay buffer capacity
+hidden:             128        # neurons per hidden layer
+
+# --- Exploration ---
+epsilon_start:      1.0
+epsilon_min:        0.05
+epsilon_decay:      0.995      # per step decay
+
+# --- Training ---
+episodes:           200
+target_update_freq: 50         # steps between target network sync

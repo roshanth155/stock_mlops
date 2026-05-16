@@ -130,7 +130,7 @@ def train(cfg: dict, config_path: str):
                 agent.save("models/policy_v1.pt")
                 # Log model to MLflow
                 mlflow.pytorch.log_model(agent.policy_net,
-                                          artifact_path="models/policy_v1")
+                                          artifact_path="policy_v1")
 
             if ep % 10 == 0:
                 print(f"  Ep {ep:4d} | Reward: {tot_reward:8.3f} | "
@@ -140,7 +140,7 @@ def train(cfg: dict, config_path: str):
         # Save final explored policy
         agent.save("models/policy_v2_explored.pt")
         mlflow.pytorch.log_model(agent.policy_net,
-                                  artifact_path="models/policy_v2_explored")
+                                  artifact_path="policy_v2_explored")
 
         # Log final summary metrics
         mlflow.log_metrics({
